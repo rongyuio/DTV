@@ -65,7 +65,8 @@ const danmakuProtover = 2
 //
 // 与斗鱼/虎牙/抖音的 manager 语义保持一致：切房间会先停掉上一个。
 type DanmakuManager struct {
-	emit EmitFunc
+	emit   EmitFunc
+	client *Client
 
 	mu      sync.Mutex
 	current *danmakuSession
@@ -73,11 +74,17 @@ type DanmakuManager struct {
 }
 
 // NewDanmakuManager 构造。
-func NewDanmakuManager(emit EmitFunc) *DanmakuManager {
+//
+// client 必须传服务层持有的那个实例：登录 Cookie、WBI key 缓存都在它里面。
+// 传 nil 时退回新建，保证独立调用（例如探针）仍可用。
+func NewDanmakuManager(emit EmitFunc, client *Client) *DanmakuManager {
 	if emit == nil {
 		emit = func(string, any) {}
 	}
-	return &DanmakuManager{emit: emit}
+	if client == nil {
+		client = NewClient()
+	}
+	return &DanmakuManager{emit: emit, client: client}
 }
 
 // RunningRoom 返回当前正在监听的房间号，没有则为空串。
@@ -339,20 +346,24 @@ func (s *danmakuSession) connectOnce() error {
 	return errors.New("所有弹幕服务器均连接失败")
 }
 
-// client 构造一个临时 HTTP 客户端（复用全局缓存的是包级变量，这里新建即可）。
+// client 返回管理器共享的 HTTP 客户端。
+// 弹幕必须复用登录后的 Cookie（getDanmuInfo token / auth uid），
+// 否则即使前端扫码登录，WS 仍是游客连接。
 func (s *danmakuSession) client() *Client {
-	return NewClient()
+	return s.manager.client
 }
 
 // readLoop 发 auth、跑心跳、读帧解析。
 func (s *danmakuSession) readLoop(conn *websocket.Conn, realRoomID, token string) error {
-	auth := fmt.Sprintf(`{"uid":0,"roomid":%s,"protover":%d,"platform":"web","type":2,"key":%q}`,
-		realRoomID, danmakuProtover, token)
+	uid := s.manager.client.loginUID()
+	// uid 是原样字符串（可能超过 int64 精确范围），用 %s 拼进 JSON 数字位。
+	auth := fmt.Sprintf(`{"uid":%s,"roomid":%s,"protover":%d,"platform":"web","type":2,"key":%q}`,
+		uid, realRoomID, danmakuProtover, token)
 
 	if err := conn.Write(s.ctx, websocket.MessageBinary, encodePacket(opAuth, []byte(auth))); err != nil {
 		return fmt.Errorf("发送 auth 失败: %w", err)
 	}
-	debugLog("已发送 auth（room=%s protover=%d）", realRoomID, danmakuProtover)
+	debugLog("已发送 auth（room=%s uid=%s protover=%d）", realRoomID, uid, danmakuProtover)
 
 	// 心跳协程
 	hbCtx, hbCancel := context.WithCancel(s.ctx)

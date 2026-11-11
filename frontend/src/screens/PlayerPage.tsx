@@ -136,6 +136,9 @@ export function PlayerPage() {
   const [infoError, setInfoError] = useState<string | null>(null);
   /** 重新拉取房间信息 / 取流地址；自动重连也靠它触发 */
   const [reloadKey, setReloadKey] = useState(0);
+  /** 登录 / 退出后让弹幕按新的 Cookie 重连 */
+  const [authRevision, setAuthRevision] = useState(0);
+
   const [danmuPanelOpen, setDanmuPanelOpen] = useState<boolean>(
     () => !loadJSON<boolean>(STORAGE_KEYS.danmuPanelCollapsed, false),
   );
@@ -399,11 +402,15 @@ export function PlayerPage() {
   // 切线路时 info 会变成新对象，但房间没变，弹幕连接不应该重建。
   const infoPlatform = info?.platform;
   const infoRoomId = info?.roomId;
+  // 不等取流完成：房间号一确定就订阅弹幕。getStreamInfo 会顺带拉全部清晰度，
+  // B 站接口慢的时候要十几秒，弹幕面板会一直停在「正在连接」。
+  const danmuPlatform = infoPlatform ?? (roomId ? platform : null);
+  const danmuRoomId = infoRoomId ?? (roomId || null);
   useEffect(() => {
-    if (!infoPlatform || !infoRoomId || !danmuEnabled) return;
+    if (!danmuPlatform || !danmuRoomId || !danmuEnabled) return;
     bufferRef.current = [];
     setMessages([]);
-    const unsubscribe = api.subscribeDanmaku(infoPlatform, infoRoomId, (msg) => {
+    const unsubscribe = api.subscribeDanmaku(danmuPlatform, danmuRoomId, (msg) => {
       // 屏蔽词在这里就拦掉：视频弹幕层和右侧弹幕列表都不该出现
       if (isDanmuBlocked(msg.content, blockKeywordsLowerRef.current)) return;
       // 正文保持原样（`[捂脸]` 这类文字表情由渲染层还原成图片，见 lib/emoticons.ts）
@@ -413,7 +420,7 @@ export function PlayerPage() {
       if (buffer.length > MAX_MESSAGES * 2) buffer.splice(0, buffer.length - MAX_MESSAGES);
     });
     return unsubscribe;
-  }, [infoPlatform, infoRoomId, danmuEnabled]);
+  }, [authRevision, danmuPlatform, danmuRoomId, danmuEnabled]);
 
   /* ----------------------------------------------------------------- 播放 */
   const variant = useMemo(() => {
@@ -523,7 +530,11 @@ export function PlayerPage() {
 
   /* B 站 / 斗鱼登录、退出后重新取流：登录态会改变服务端下发的清晰度档位。 */
   useEffect(() => {
-    const onAuthChanged = () => setReloadKey((k) => k + 1);
+    const onAuthChanged = () => {
+      setReloadKey((k) => k + 1);
+      // Cookie 变了，弹幕 WS 也要按新身份重连
+      setAuthRevision((v) => v + 1);
+    };
     window.addEventListener(DOUYU_AUTH_EVENT, onAuthChanged);
     window.addEventListener(BILIBILI_AUTH_EVENT, onAuthChanged);
     return () => {

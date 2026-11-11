@@ -108,6 +108,44 @@ func (c *Client) Cookie() string {
 	return c.cookie
 }
 
+// loginUID 返回登录 Cookie 里的 DedeUserID（未登录为 "0"）。
+//
+// 弹幕 WebSocket 的 auth 包要用真实 uid；传 0 会让已登录账号仍按游客处理，
+// 昵称打码、消息量也会按游客策略裁剪。
+//
+// 返回字符串而不是整数：uid 已经超过 10 位，且没有位数上限承诺。走
+// jsonInt/parseViewerText（那条是给「1.2万人」这类展示文本用的）会经过
+// float64，尾数只有 53 位，超过 2^53 后低位静默丢失。这里只校验是纯十进制
+// 数字，然后原样交给 JSON —— 不经过任何整数/浮点类型，就没有宽度假设。
+func (c *Client) loginUID() string {
+	for _, part := range strings.Split(c.Cookie(), ";") {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || name != "DedeUserID" {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		// 直接拼进 JSON，必须挡住非数字内容（防止 cookie 值破坏 auth 包）。
+		if !allDigits(value) {
+			return "0"
+		}
+		return value
+	}
+	return "0"
+}
+
+// allDigits 判断字符串非空且全为 ASCII 十进制数字。
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // headers 返回 B 站接口通用请求头。
 func (c *Client) headers() map[string]string {
 	cookie := c.Cookie()
